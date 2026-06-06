@@ -151,7 +151,46 @@ SHAPES = [
     galaxy_positions, cross_positions, heart_positions
 ]
 
-# ── Shaders ──────────────────────────────────────────────────
+# ── Background Shaders ───────────────────────────────────────
+BG_VERTEX_SHADER = """
+#version 330 core
+layout(location = 0) in vec2 in_pos;
+out vec2 vUV;
+void main(){
+    vUV = in_pos * 0.5 + 0.5;
+    gl_Position = vec4(in_pos, 0.0, 1.0);
+}
+"""
+
+BG_FRAGMENT_SHADER = """
+#version 330 core
+uniform vec2  resolution;
+uniform float time;
+in  vec2  vUV;
+out vec4  fragColor;
+
+void main(){
+    float tileSize  = 60.0;
+    float lineWidth = 2.5;
+
+    vec2 pixel = vUV * resolution;
+    vec2 cell  = mod(pixel, tileSize);
+
+    bool onLine = cell.x < lineWidth || cell.y < lineWidth;
+
+    // Subtle shimmer on grout lines
+    vec2 tileID   = floor(pixel / tileSize);
+    float shimmer = 0.5 + 0.5 * sin(time * 1.2 + tileID.x * 0.7 + tileID.y * 1.1);
+
+    vec3 tilCol   = vec3(18.0/255.0, 0.0, 58.0/255.0);          // dark purple tile
+    vec3 groutCol = vec3(38.0/255.0, 10.0/255.0, 80.0/255.0)    // slightly lighter grout
+                  + vec3(0.04) * shimmer;
+
+    fragColor = vec4(onLine ? groutCol : tilCol, 1.0);
+}
+"""
+
+# ── Particle Shaders ─────────────────────────────────────────
 VERTEX_SHADER = """
 #version 330 core
 
@@ -265,6 +304,32 @@ def rot_z(a):
     m[0,0]=c; m[0,1]=-s; m[1,0]=s; m[1,1]=c
     return m
 
+# ── Background Renderer ───────────────────────────────────────
+class BackgroundRenderer:
+    def __init__(self, prog):
+        self.prog = prog
+        quad = np.array([
+            -1, -1,   1, -1,   1,  1,
+            -1, -1,   1,  1,  -1,  1,
+        ], dtype=np.float32)
+        self.vao = glGenVertexArrays(1)
+        self.vbo = glGenBuffers(1)
+        glBindVertexArray(self.vao)
+        glBindBuffer(GL_ARRAY_BUFFER, self.vbo)
+        glBufferData(GL_ARRAY_BUFFER, quad.nbytes, quad, GL_STATIC_DRAW)
+        glEnableVertexAttribArray(0)
+        glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, ctypes.c_void_p(0))
+        glBindVertexArray(0)
+
+    def render(self, w, h, t):
+        glUseProgram(self.prog)
+        glUniform2f(glGetUniformLocation(self.prog, "resolution"), float(w), float(h))
+        glUniform1f(glGetUniformLocation(self.prog, "time"), t)
+        glBindVertexArray(self.vao)
+        glDrawArrays(GL_TRIANGLES, 0, 6)
+        glBindVertexArray(0)
+
+
 # ── Particle Object ───────────────────────────────────────────
 class ParticleObject:
     def __init__(self, prog, base_positions, scale=1.0, rot_y_offset=0.0):
@@ -352,6 +417,9 @@ def main():
         vert = shaders.compileShader(VERTEX_SHADER,   GL_VERTEX_SHADER)
         frag = shaders.compileShader(FRAGMENT_SHADER, GL_FRAGMENT_SHADER)
         prog = shaders.compileProgram(vert, frag)
+        bg_vert = shaders.compileShader(BG_VERTEX_SHADER,   GL_VERTEX_SHADER)
+        bg_frag = shaders.compileShader(BG_FRAGMENT_SHADER, GL_FRAGMENT_SHADER)
+        bg_prog = shaders.compileProgram(bg_vert, bg_frag)
         print("Shaders compiled OK")
     except Exception as e:
         print("Shader error:", e)
@@ -365,6 +433,8 @@ def main():
 
     w, h = WIDTH, HEIGHT
     glViewport(0, 0, w, h)
+
+    bg = BackgroundRenderer(bg_prog)
 
     base = sphere_positions()
     obj1 = ParticleObject(prog, base, scale=1.0,  rot_y_offset=0.0)
@@ -441,8 +511,16 @@ def main():
         obj2.rx, obj2.ry, obj2.rz, obj2.py = rot2[0], rot2[1], rot2[2], float_y
 
         # Render
-        glClearColor(18/255, 0, 58/255, 1.0)
+        glClearColor(0, 0, 0, 1.0)
         glClear(GL_COLOR_BUFFER_BIT)
+
+        # Draw tiled background (no blending)
+        glDisable(GL_BLEND)
+        bg.render(w, h, t)
+
+        # Draw particles (additive blending)
+        glEnable(GL_BLEND)
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE)
         glUseProgram(prog)
 
         obj1.render(view, proj, t,       morph_factor, beat_scale, t)
